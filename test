@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+PARAMS=(
+	'-j1 rule_ok NUM_SLOTS=1'
+	'-j1 rule_ok NUM_SLOTS=5'
+	'-j1 rule_ok NUM_SLOTS=10'
+	'-j1 rule_ok NUM_SLOTS=20'
+
+	'-j rule_ok NUM_SLOTS=1'
+	'-j rule_ok NUM_SLOTS=5'
+	'-j rule_ok NUM_SLOTS=10'
+	'-j rule_ok NUM_SLOTS=20'
+
+	'-j10 rule_ok NUM_SLOTS=1'
+	'-j10 rule_ok NUM_SLOTS=5'
+	'-j10 rule_ok NUM_SLOTS=10'
+	'-j10 rule_ok NUM_SLOTS=20'
+
+	'-j1 rule_error NUM_SLOTS=1'
+	'-j1 rule_error NUM_SLOTS=5'
+	'-j1 rule_error NUM_SLOTS=10'
+	'-j1 rule_error NUM_SLOTS=20'
+
+	'-j rule_error NUM_SLOTS=1'
+	'-j rule_error NUM_SLOTS=5'
+	'-j rule_error NUM_SLOTS=10'
+	'-j rule_error NUM_SLOTS=20'
+
+	'-j10 rule_error NUM_SLOTS=1'
+	'-j10 rule_error NUM_SLOTS=5'
+	'-j10 rule_error NUM_SLOTS=10'
+	'-j10 rule_error NUM_SLOTS=20'
+)
+
+RC=(
+	'NUM_SLOTS not defined'
+	'make -j'
+	'make -j'
+	'make -j'
+
+	'NUM_SLOTS not defined'
+	'make -j'
+	'make -j'
+	'make -j'
+
+	'NUM_SLOTS not defined'
+	'Read 4 bytes.+Return 4 bytes'
+	'Read 9 bytes.+Return 9 bytes'
+	'Run forced'
+
+	'NUM_SLOTS not defined.+command not found'
+	'make -j.+command not found'
+	'make -j.+command not found'
+	'make -j.+command not found'
+
+	'NUM_SLOTS not defined.+command not found'
+	'make -j.+command not found'
+	'make -j.+command not found'
+	'make -j.+command not found'
+
+	'NUM_SLOTS not defined.+command not found'
+	'Read 4 bytes.+command not found.+Return 4 bytes'
+	'Read 9 bytes.+command not found.+Return 9 bytes'
+	'Run forced.+command not found'
+)
+
+for i in "${!PARAMS[@]}"; do
+	params="${PARAMS[$i]}"
+	rc="${RC[$i]}"
+
+	printf "Test %-3s: make %-30s" "$i" "$params"
+	msg="$(make $params 2>&1)"
+
+	if [[ "$msg" =~ $rc ]]; then
+		echo -e "ok"
+	else
+		echo -e "not ok"
+	fi
+done

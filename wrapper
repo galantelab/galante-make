@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+
+set -o errexit
+set -o pipefail
+set -o nounset
+
+# Print debug messages
+DEBUG=
+
+# This variable may be defined by the user
+# in order to orchestrate the jobserver
+NUM_SLOTS=
+
+# Get --jobserver-auth and the total
+# number of jobs set by the user
+JOBSERVER_FLAG=
+TOTALJOBS_FLAG=
+
+# Each byte represents a job slot from jobserver pool
+# All the bytes taken must be given back at the end
+# of the operations
+BYTES=
+
+# If --jobserver-auth=fifo:/path/to/fifo, then
+# get the filename of the FIFO
+FIFO=
+
+# if --jobserver-auth=R,W, then get both file
+# descriptors. [0]R=read and [1]W=write
+FD=()
+
+# Run command and exit
+run_cmd() {
+	eval "$@"
+	exit
+}
+
+# Warning wrapper
+warn() {
+	echo "wrapper: $@" >&2
+}
+
+# Debug wrapper. Print if defined DEBUG
+debug() {
+	if [[ -n "$DEBUG" ]]; then
+		echo "wrapper [debug]: $@" >&2
+	fi
+}
+
+# It must be trapped in order to cleanup
+# all the mess before exiting
+cleanup() {
+	if [[ -n "$BYTES" ]]; then
+		if [[ -n "$FIFO" ]]; then
+			debug "Return ${#BYTES} bytes to jobserver-auth=fifo:$FIFO"
+			echo -n "$BYTES" > "$FIFO"
+		elif [[ -n "$FD" ]]; then
+			debug "Return ${#BYTES} bytes to jobserver-auth=${FD[0]},${FD[1]}"
+			echo -n "$BYTES" >&"${FD[1]}"
+		fi
+	fi
+}
+
+# Try to allocate slots from jobserver
+try_allocate_slots() {
+	if [[ "$JOBSERVER_FLAG" =~ --jobserver-auth=fifo:(.+) ]]; then
+		# Set FIFO path
+		FIFO="${BASH_REMATCH[1]}"
+
+		# Try to consume the number of required jobs from FIFO
+		if ! read -n "$(( NUM_SLOTS - 1 ))" BYTES < "$FIFO" 2> /dev/null; then
+			warn "Cannot read fifo:$FIFO. It will not consume jobserver slots"
+		else
+			debug "Read ${#BYTES} bytes from jobserver-auth=fifo:$FIFO"
+		fi
+	elif [[ "$JOBSERVER_FLAG" =~ --jobserver-auth=(-*[0-9]+),(-*[0-9]+) ]]; then
+		# Set the array to both file descriptors
+		FD=(${BASH_REMATCH[1]} ${BASH_REMATCH[2]})
+
+		# Check if both file descriptors are valid before consuming the jobs
+		# If they are not, do not consume more jobs
+		if [[ "${FD[0]}" -ge 0 && "${FD[1]}" -ge 0 ]]; then
+			# The FD[0] can be a valid integer and a bad fd at the same time
+			if ! read -n "$(( NUM_SLOTS - 1 ))" -u "${FD[0]}" BYTES 2> /dev/null; then
+				warn "Cannot read file descriptor. Maybe you should append '+' before your command"
+			else
+				debug "Read ${#BYTES} bytes from jobserver-auth=${FD[0]},${FD[1]}"
+			fi
+		else
+			warn "File descriptor not available. Maybe you should append '+' before your command"
+		fi
+	# Something weird happend
+	else
+		warn "Unknown --jobserver-auth: '$JOBSERVER_FLAG'"
+	fi
+}
+
+# Parse MAKEFLAGS which is set by make
+parse_makeflags() {
+	# Make a an array with all CLI flags
+	local makeflags_a=($MAKEFLAGS)
+
+	# Look for  the last --jobserver-auth and
+	# get the total amount of jobs into the pool
+	# with the flag -j
+	for flag in "${makeflags_a[@]}"; do
+		if [[ "$flag" =~ --jobserver-auth ]]; then
+			JOBSERVER_FLAG="$flag"
+		elif [[ "$flag" =~ -j[0-9]+ ]]; then
+			TOTALJOBS_FLAG="$flag"
+		fi
+	done
+
+	# Make called with infinite number of jobs `make -j` or with just one
+	# `make -j1`  will skip this test
+	if [[ -n "$TOTALJOBS_FLAG" && "${TOTALJOBS_FLAG:2}" -gt 1 ]]; then
+		# Throw an warning if we cannot define `--jobserver-auth`
+		if [[ -z "$JOBSERVER_FLAG" ]]; then
+			warn "$TOTALJOBS_FLAG is set, but cannot define --jobserver-auth"
+		# Throw an warning if NUM_SLOTS greater than TOTALJOBS_FLAG
+		# We cannot consume more jobs than there are in the pool
+		elif [[ "$NUM_SLOTS" -gt "${TOTALJOBS_FLAG:2}" ]]; then
+			warn "NUM_SLOTS=$NUM_SLOTS greater than --jobs=${TOTALJOBS_FLAG:2}. Run forced"
+		# If `make -j N` with (N > 1), --jobserver-auth is defined and
+		# NUM_SLOTS <= TOTALJOBS_FLAG, try to allocate more slots
+		else
+			try_allocate_slots
+		fi
+	else
+		debug 'Make called with `make -j` or `make -j1`'
+	fi
+}
+
+main() {
+	# Remove trailing '-c' if any
+	[[ "$1" == '-c' ]] && shift
+
+	# Our hero
+	local cmd="$@"
+
+	# Trap the EXIT signal to always release the bytes
+	# taken from the jobserver pool
+	trap cleanup EXIT
+
+	# Get env variable DEBUG value
+	if [[ "$cmd" =~ DEBUG=([A-Za-z0-9]+) ]]; then
+		DEBUG="${BASH_REMATCH[1]}"
+	fi
+
+	# Get env variable NUM_SLOTS value
+	if [[ "$cmd" =~ NUM_SLOTS=([0-9]+) ]]; then
+		NUM_SLOTS="${BASH_REMATCH[1]}"
+	fi
+
+	# Run command as it is if NUM_SLOTS= or NUM_SLOTS < 2
+	if [[ -n "$NUM_SLOTS" && "$NUM_SLOTS" -gt 1 ]]; then
+		parse_makeflags
+	else
+		debug "Do not use jobserver, because NUM_SLOTS not defined or lesser than 2"
+	fi
+
+	# Gooooooooo
+	run_cmd "$cmd"
+}
+
+# Do nothing if the first char is 'n'
+[[ "$MAKEFLAGS" =~ ^n  ]] || main "$@"
+
+# FINITO
